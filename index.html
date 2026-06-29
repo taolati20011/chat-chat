@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>chat-chat — anonymous group chat</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Plus+Jakarta+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: oklch(0.985 0.006 85);
+    --bg-2: oklch(0.965 0.008 85);
+    --card: #ffffff;
+    --ink: oklch(0.22 0.02 250);
+    --ink-soft: oklch(0.45 0.015 250);
+    --ink-mute: oklch(0.62 0.012 250);
+    --line: oklch(0.92 0.008 250);
+    --line-2: oklch(0.96 0.006 250);
+    --accent: oklch(0.62 0.13 162);
+    --accent-ink: oklch(0.32 0.08 162);
+    --accent-soft: oklch(0.94 0.04 162);
+    --warm: oklch(0.7 0.13 38);
+    --warm-soft: oklch(0.95 0.04 38);
+    --shadow-sm: 0 1px 2px rgba(20, 30, 50, 0.04), 0 1px 1px rgba(20, 30, 50, 0.03);
+    --shadow-md: 0 6px 24px -10px rgba(20, 30, 50, 0.12), 0 2px 6px rgba(20, 30, 50, 0.04);
+    --shadow-lg: 0 24px 60px -20px rgba(20, 30, 50, 0.18), 0 8px 20px -10px rgba(20, 30, 50, 0.08);
+    --r-sm: 8px;
+    --r-md: 14px;
+    --r-lg: 22px;
+    --r-xl: 28px;
+    --sans: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
+    --serif: "Instrument Serif", "Times New Roman", serif;
+    --mono: "JetBrains Mono", ui-monospace, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    min-height: 100vh;
+  }
+  button { font-family: inherit; }
+  input, textarea { font-family: inherit; }
+  ::selection { background: var(--accent-soft); color: var(--accent-ink); }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+  @keyframes shake { 0%,100%{transform:translateX(0)} 20%{transform:translateX(-6px)} 40%{transform:translateX(6px)} 60%{transform:translateX(-4px)} 80%{transform:translateX(4px)} }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="module" src="/src/main.jsx"></script>
+</body>
+</html>
