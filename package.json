@@ -1,5 +1,8 @@
 {
   "name": "chat-chat",
+  "engines": {
+    "node": ">=22.5.0"
+  },
   "private": true,
   "version": "0.1.0",
   "type": "module",
