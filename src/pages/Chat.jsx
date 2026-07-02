@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { getRooms, getMessages, createRoom as apiCreateRoom, sendAiMessage } from '../lib/api'
+import { getSocket, disconnectSocket } from '../lib/socket'
 
-const STORE_KEY = "chatchat.v1"
-const now = () => Date.now()
 const fmtTime = (ts) => {
   const d = new Date(ts)
   return d.toLocaleTimeString([], { hour:"2-digit", minute:"2-digit" })
@@ -25,59 +25,14 @@ const hue = (s) => {
 const avatarBg = (n) => `oklch(0.78 0.08 ${hue(n)})`
 const avatarInk = (n) => `oklch(0.28 0.06 ${hue(n)})`
 
-const DEFAULT_CATEGORIES = [
-  { id:"r-general", name:"General",   emoji:"💬", createdBy:"system", createdAt: Date.now() - 86400000*10 },
-  { id:"r-gaming",  name:"Gaming",    emoji:"🎮", createdBy:"system", createdAt: Date.now() - 86400000*9 },
-  { id:"r-music",   name:"Music",     emoji:"🎵", createdBy:"system", createdAt: Date.now() - 86400000*8 },
-  { id:"r-tech",    name:"Tech talk", emoji:"🛠",  createdBy:"system", createdAt: Date.now() - 86400000*7 },
-  { id:"r-movies",  name:"Movies",    emoji:"🎬", createdBy:"system", createdAt: Date.now() - 86400000*6 },
-  { id:"r-sports",  name:"Sports",    emoji:"⚽", createdBy:"system", createdAt: Date.now() - 86400000*5 },
-  { id:"r-random",  name:"Random",    emoji:"🪩", createdBy:"system", createdAt: Date.now() - 86400000*4 },
-]
-
-function loadStore() {
-  try {
-    const raw = localStorage.getItem(STORE_KEY)
-    if (raw) return JSON.parse(raw)
-  } catch {}
-  const t = now()
-  const msgs = {
-    "r-general": [
-      { id:"m1", who:"Swift Penguin", text:"hey everyone, new here!", ts: t - 3600_000*5 },
-      { id:"m2", who:"Brave Otter",   text:"welcome! this place is chill", ts: t - 3600_000*5 + 70_000 },
-      { id:"m3", who:"Gentle Fox",    text:"grab a room and start chatting", ts: t - 3600_000*4 },
-    ],
-    "r-gaming": [
-      { id:"m1", who:"Fierce Tiger",  text:"anyone playing tonight?", ts: t - 3600_000*3 },
-      { id:"m2", who:"Quick Falcon",  text:"yes! 30 min?", ts: t - 3600_000*3 + 40_000 },
-      { id:"m3", who:"Fierce Tiger",  text:"perfect, see you there", ts: t - 3600_000*2 },
-    ],
-    "r-music": [
-      { id:"m1", who:"Calm Deer",     text:"listening to anything good?", ts: t - 3600_000*22 },
-      { id:"m2", who:"Jolly Parrot",  text:"new album dropped today 🔥", ts: t - 3600_000*21 },
-    ],
-    "r-tech": [
-      { id:"m1", who:"Curious Owl",   text:"has anyone tried the new framework?", ts: t - 3600_000*2 },
-      { id:"m2", who:"Nimble Gecko",   text:"yeah it's fast but docs are rough", ts: t - 3600_000*2 + 40_000 },
-    ],
-    "r-movies": [],
-    "r-sports": [],
-    "r-random": [
-      { id:"m1", who:"Wild Cobra",    text:"random thought: do fish get thirsty?", ts: t - 3600_000*30 },
-      { id:"m2", who:"Fuzzy Alpaca",   text:"asking the real questions", ts: t - 3600_000*28 },
-    ],
-  }
-  const out = { cats: DEFAULT_CATEGORIES, msgs, active: "r-general" }
-  localStorage.setItem(STORE_KEY, JSON.stringify(out))
-  return out
-}
-function saveStore(s) { localStorage.setItem(STORE_KEY, JSON.stringify(s)) }
-
 const ROOM_PRESETS = ["💬","🎬","🛠","🥡","🐈","📚","🎧","⚽","🎮","✈️","🍵","🌱","🪩","🧪","💡","📷","🎨","🧶"]
 
 function Chat({ user, logout }) {
   const navigate = useNavigate()
-  const [store, setStore] = useState(() => loadStore())
+  const [rooms, setRooms] = useState([])
+  const [activeRoomId, setActiveRoomId] = useState(null)
+  const [messages, setMessages] = useState([])
+  const [presenceByRoom, setPresenceByRoom] = useState({})
   const [query, setQuery] = useState("")
   const [showNew, setShowNew] = useState(false)
   const [newName, setNewName] = useState("")
@@ -87,25 +42,88 @@ function Chat({ user, logout }) {
   const [aiMode, setAiMode] = useState(false)
   const [aiMessages, setAiMessages] = useState([])
   const [aiDraft, setAiDraft] = useState("")
+  const [aiLoading, setAiLoading] = useState(false)
   const scrollRef = useRef(null)
   const emojiWrapRef = useRef(null)
+  const socketRef = useRef(null)
+  const activeRoomIdRef = useRef(null)
+  const prevRoomRef = useRef(null)
 
-  useEffect(() => { saveStore(store) }, [store])
+  useEffect(() => { activeRoomIdRef.current = activeRoomId }, [activeRoomId])
 
-  const filteredCats = useMemo(() => {
+  useEffect(() => {
+    let cancelled = false
+    getRooms().then(rs => { if (!cancelled) setRooms(rs) }).catch(console.error)
+    return () => { cancelled = true }
+  }, [])
+
+  useEffect(() => {
+    if (!activeRoomId && rooms.length) setActiveRoomId(rooms[0].id)
+  }, [rooms, activeRoomId])
+
+  useEffect(() => {
+    const socket = getSocket(user)
+    socketRef.current = socket
+
+    const onMessageNew = (msg) => {
+      setRooms(prev => prev.map(r =>
+        r.id === msg.roomId ? { ...r, lastMessage: { who: msg.who, text: msg.text, ts: msg.ts } } : r
+      ))
+      if (msg.roomId !== activeRoomIdRef.current) return
+      setMessages(prev => {
+        const idx = prev.findIndex(m => m.clientId && m.clientId === msg.clientId)
+        if (idx !== -1) {
+          const copy = [...prev]
+          copy[idx] = { id: msg.id, who: msg.who, text: msg.text, ts: msg.ts }
+          return copy
+        }
+        if (prev.some(m => m.id === msg.id)) return prev
+        return [...prev, { id: msg.id, who: msg.who, text: msg.text, ts: msg.ts }]
+      })
+    }
+    const onPresence = ({ roomId, users }) => {
+      setPresenceByRoom(prev => ({ ...prev, [roomId]: users }))
+    }
+    const onRoomCreated = (room) => {
+      setRooms(prev => prev.some(r => r.id === room.id) ? prev : [room, ...prev])
+    }
+
+    socket.on('message:new', onMessageNew)
+    socket.on('presence:update', onPresence)
+    socket.on('room:created', onRoomCreated)
+
+    return () => {
+      socket.off('message:new', onMessageNew)
+      socket.off('presence:update', onPresence)
+      socket.off('room:created', onRoomCreated)
+    }
+  }, [user])
+
+  useEffect(() => {
+    if (!activeRoomId) return
+    const socket = socketRef.current
+    if (prevRoomRef.current && prevRoomRef.current !== activeRoomId) {
+      socket.emit('room:leave', prevRoomRef.current)
+    }
+    socket.emit('room:join', activeRoomId)
+    prevRoomRef.current = activeRoomId
+    setMessages([])
+    getMessages(activeRoomId).then(setMessages).catch(console.error)
+  }, [activeRoomId])
+
+  const filteredRooms = useMemo(() => {
     const q = query.trim().toLowerCase()
-    if (!q) return store.cats
-    return store.cats.filter(c => c.name.toLowerCase().includes(q))
-  }, [store.cats, query])
+    if (!q) return rooms
+    return rooms.filter(r => r.name.toLowerCase().includes(q))
+  }, [rooms, query])
 
-  const active = store.cats.find(c => c.id === store.active) || store.cats[0]
-  const messages = !aiMode && active ? (store.msgs[active.id] || []) : []
+  const active = rooms.find(r => r.id === activeRoomId)
 
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight
     }
-  }, [active && active.id, messages.length, aiMessages.length, aiMode])
+  }, [activeRoomId, messages.length, aiMessages.length, aiMode])
 
   useEffect(() => {
     if (!showEmoji) return
@@ -122,17 +140,16 @@ function Chat({ user, logout }) {
     setShowEmoji(false)
   }
 
-  const createRoom = () => {
+  const createRoom = async () => {
     const name = newName.trim()
     if (!name) return
-    const id = "r-" + Math.random().toString(36).slice(2, 8)
-    const cat = { id, name, emoji:newEmoji, createdBy:user, createdAt: now() }
-    setStore(s => ({
-      ...s,
-      cats: [cat, ...s.cats],
-      msgs: { ...s.msgs, [id]: [] },
-      active: id,
-    }))
+    try {
+      const room = await apiCreateRoom({ name, emoji: newEmoji, createdBy: user })
+      setRooms(prev => prev.some(r => r.id === room.id) ? prev : [room, ...prev])
+      setActiveRoomId(room.id)
+    } catch (e) {
+      console.error(e)
+    }
     setNewName(""); setNewEmoji("💬"); setShowNew(false)
     setAiMode(false)
   }
@@ -140,49 +157,42 @@ function Chat({ user, logout }) {
   const send = () => {
     const text = draft.trim()
     if (!text || !active) return
-    const m = { id: "m" + now(), who: user, text, ts: now() }
-    setStore(s => ({
-      ...s,
-      msgs: { ...s.msgs, [active.id]: [...(s.msgs[active.id] || []), m] }
-    }))
+    const clientId = crypto.randomUUID()
+    const optimistic = { id: clientId, clientId, who: user, text, ts: Date.now() }
+    setMessages(prev => [...prev, optimistic])
+    socketRef.current?.emit('message:send', { roomId: active.id, text, clientId })
     setDraft("")
-
-    const replies = [
-      "ok noted","ha — same","fair","lol","yes",
-      "i'll be there in a sec","good call","let's do it","makes sense to me",
-      "👀","🙏","🔥","sounds right","one sec","on it"
-    ]
-    const others = ["Swift Penguin","Brave Otter","Gentle Fox","Curious Owl","Fierce Tiger","Calm Deer"].filter(n => n !== user)
-    const who = others[Math.floor(Math.random()*others.length)]
-    const txt = replies[Math.floor(Math.random()*replies.length)]
-    setTimeout(() => {
-      setStore(s => {
-        if (!s.msgs[active.id]) return s
-        return {
-          ...s,
-          msgs: {
-            ...s.msgs,
-            [active.id]: [...s.msgs[active.id], { id:"m"+now()+"-r", who, text:txt, ts: now() }]
-          }
-        }
-      })
-    }, 900 + Math.random()*1600)
   }
 
-  const sendAi = () => {
+  const sendAi = async () => {
     const text = aiDraft.trim()
-    if (!text) return
-    setAiMessages(prev => [...prev, { id: "ai-"+now(), who: user, text, ts: now(), role: "user" }])
+    if (!text || aiLoading) return
+    const userMsg = { id: "ai-"+Date.now(), who: user, text, ts: Date.now(), role: "user" }
+    const nextHistory = [...aiMessages, userMsg]
+    setAiMessages(nextHistory)
     setAiDraft("")
-    setTimeout(() => {
+    setAiLoading(true)
+    try {
+      const history = nextHistory.map(m => ({ role: m.role, text: m.text }))
+      const { text: reply } = await sendAiMessage(history)
       setAiMessages(prev => [...prev, {
-        id: "ai-"+now()+"-r",
-        who: "Claude AI",
-        text: "AI chat will be connected in Step 5! For now, this is a placeholder. I'll be able to answer your questions once the Claude API is integrated.",
-        ts: now(),
+        id: "ai-"+Date.now()+"-r",
+        who: "Gemini",
+        text: reply,
+        ts: Date.now(),
         role: "assistant"
       }])
-    }, 800 + Math.random()*1200)
+    } catch (err) {
+      setAiMessages(prev => [...prev, {
+        id: "ai-"+Date.now()+"-err",
+        who: "Gemini",
+        text: "⚠️ " + (err.message || "Something went wrong, please try again."),
+        ts: Date.now(),
+        role: "assistant"
+      }])
+    } finally {
+      setAiLoading(false)
+    }
   }
 
   const onKey = (e) => {
@@ -193,24 +203,26 @@ function Chat({ user, logout }) {
   }
 
   const selectRoom = (id) => {
-    setStore(s => ({...s, active: id}))
+    setActiveRoomId(id)
     setAiMode(false)
   }
 
-  const lastMsgPreview = (cat) => {
-    const list = store.msgs[cat.id] || []
-    const m = list[list.length-1]
-    if (!m) return { text:"no messages yet", ts: cat.createdAt, you:false }
-    return { text: m.text, ts: m.ts, you: m.who === user }
+  const lastMsgPreview = (room) => {
+    const lm = room.lastMessage
+    if (!lm) return { text:"no messages yet", ts: room.createdAt, you:false }
+    return { text: lm.text, ts: lm.ts, you: lm.who === user }
   }
 
   const handleLogout = () => {
+    disconnectSocket()
     logout()
     navigate('/')
   }
 
   const currentDraft = aiMode ? aiDraft : draft
   const setCurrentDraft = aiMode ? setAiDraft : setDraft
+
+  const presentUsers = (presenceByRoom[active?.id] || []).filter(n => n !== user)
 
   return (
     <div style={cs.app}>
@@ -257,21 +269,21 @@ function Chat({ user, logout }) {
 
         <div style={cs.sideHead}>
           <span>Categories</span>
-          <span style={cs.sideCount}>{filteredCats.length}</span>
+          <span style={cs.sideCount}>{filteredRooms.length}</span>
         </div>
 
         <div style={cs.roomList}>
-          {filteredCats.map(cat => {
-            const sel = !aiMode && cat.id === store.active
-            const last = lastMsgPreview(cat)
+          {filteredRooms.map(room => {
+            const sel = !aiMode && room.id === activeRoomId
+            const last = lastMsgPreview(room)
             return (
-              <button key={cat.id}
-                onClick={()=>selectRoom(cat.id)}
+              <button key={room.id}
+                onClick={()=>selectRoom(room.id)}
                 style={{...cs.roomItem, ...(sel ? cs.roomItemSel : {})}}>
-                <div style={{...cs.roomEmoji, ...(sel ? cs.roomEmojiSel : {})}}>{cat.emoji}</div>
+                <div style={{...cs.roomEmoji, ...(sel ? cs.roomEmojiSel : {})}}>{room.emoji}</div>
                 <div style={{flex:1, minWidth:0, textAlign:"left"}}>
                   <div style={cs.roomLine1}>
-                    <span style={cs.roomName}>{cat.name}</span>
+                    <span style={cs.roomName}>{room.name}</span>
                     <span style={cs.roomTime}>{fmtDay(last.ts)}</span>
                   </div>
                   <div style={cs.roomLine2}>
@@ -282,7 +294,7 @@ function Chat({ user, logout }) {
               </button>
             )
           })}
-          {filteredCats.length === 0 && (
+          {filteredRooms.length === 0 && (
             <div style={cs.empty}>No rooms match "{query}"</div>
           )}
         </div>
@@ -309,7 +321,7 @@ function Chat({ user, logout }) {
                 <div style={{...cs.headEmoji, background:"oklch(0.92 0.06 280)"}}>🤖</div>
                 <div>
                   <div style={cs.headName}>AI Chat</div>
-                  <div style={cs.headMeta}>powered by Claude · always available</div>
+                  <div style={cs.headMeta}>powered by Gemini · always available</div>
                 </div>
               </div>
             </header>
@@ -319,7 +331,7 @@ function Chat({ user, logout }) {
                 <div style={cs.empty2}>
                   <div style={cs.emptyEmoji}>🤖</div>
                   <div style={cs.emptyTitle}>Chat with AI</div>
-                  <div style={cs.emptySub}>Ask anything — powered by Claude. (Coming in Step 5!)</div>
+                  <div style={cs.emptySub}>Ask anything — powered by Gemini.</div>
                 </div>
               ) : (
                 <div style={{display:"flex", flexDirection:"column", gap:2}}>
@@ -343,7 +355,7 @@ function Chat({ user, logout }) {
                 </div>
               </div>
               <div style={cs.headActions}>
-                <PresenceStack names={["Swift Penguin","Brave Otter","Gentle Fox","Curious Owl"].filter(n=>n!==user).slice(0,4)}/>
+                <PresenceStack names={presentUsers.slice(0,4)} extra={Math.max(0, presentUsers.length-4)}/>
                 <button style={cs.iconBtn} title="Room info">
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
                     <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2"/>
@@ -400,10 +412,10 @@ function Chat({ user, logout }) {
                 </button>
               </div>
               <button
-                style={{...cs.sendBtn, ...(currentDraft.trim() ? {} : cs.sendBtnOff)}}
+                style={{...cs.sendBtn, ...((currentDraft.trim() && !aiLoading) ? {} : cs.sendBtnOff)}}
                 onClick={aiMode ? sendAi : send}
-                disabled={!currentDraft.trim()}
-                title="Send">
+                disabled={!currentDraft.trim() || aiLoading}
+                title={aiLoading ? "Waiting for Gemini…" : "Send"}>
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
                   <path d="M5 12l14-7-4 14-3-6-7-1z" stroke="currentColor" strokeWidth="2" strokeLinejoin="round"/>
                 </svg>
@@ -531,7 +543,7 @@ function MessageRow({m, mine, grouped}) {
   )
 }
 
-function PresenceStack({names}) {
+function PresenceStack({names, extra}) {
   return (
     <div style={cs.presence}>
       {names.map((n, i) => (
@@ -545,7 +557,7 @@ function PresenceStack({names}) {
           {initials(n)}
         </div>
       ))}
-      <span style={cs.presenceCount}>+{Math.max(0, 12 - names.length)}</span>
+      {extra > 0 && <span style={cs.presenceCount}>+{extra}</span>}
     </div>
   )
 }

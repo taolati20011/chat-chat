@@ -78,7 +78,7 @@ function Landing() {
           />
           <Card
             title="Chat with AI"
-            body="No one online? Talk to AI instead. Same chat interface, powered by Claude. Ask anything."
+            body="No one online? Talk to AI instead. Same chat interface, powered by Gemini. Ask anything."
             tag="ai"
           />
         </div>
