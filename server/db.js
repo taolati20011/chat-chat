@@ -3,7 +3,8 @@ import { fileURLToPath } from 'url'
 import path from 'path'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const db = new DatabaseSync(path.join(__dirname, 'data.sqlite'))
+const dbPath = process.env.SQLITE_PATH || path.join(__dirname, 'data.sqlite')
+const db = new DatabaseSync(dbPath)
 
 db.exec('PRAGMA journal_mode = WAL')
 

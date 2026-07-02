@@ -127,6 +127,36 @@ DELETE FROM messages WHERE ts < Date.now() - RETENTION_DAYS * 86400000
 ```
 Default: 7 days. Override with `RETENTION_DAYS=3` in `server/.env`.
 
+## Deploying to Railway
+
+The app is configured to deploy as a single Railway service (frontend + backend together).
+
+### One-time setup
+
+1. Push the repo to GitHub
+2. Go to [railway.app](https://railway.app) → New Project → Deploy from GitHub repo
+3. Railway auto-detects `railway.toml` and runs:
+   - **Build:** `npm install && npm install --prefix server && npm run build`
+   - **Start:** `npm start` → `NODE_ENV=production node server/index.js`
+4. Add environment variables in Railway dashboard:
+   - `GEMINI_API_KEY` — your Gemini API key (from `server/.env`)
+   - `RETENTION_DAYS` — optional, default is `7`
+   - `SQLITE_PATH` — optional, set to `/data/data.sqlite` if you add a Railway volume for persistence
+
+### How production mode works
+
+In production (`NODE_ENV=production`), Express serves both the API and the built React frontend from the same port:
+- `GET /api/*` and WebSocket `/socket.io` → handled by Express/Socket.io
+- Everything else → serves `dist/index.html` (React SPA)
+
+CORS is disabled in production because everything is same-origin. The Vite dev proxy (`vite.config.js`) only applies during local development.
+
+### Persistent database (optional)
+
+Without a Railway volume, SQLite data survives server restarts but is wiped on new deploys. To persist across deploys:
+1. Add a Railway Volume mounted at `/data`
+2. Set env var `SQLITE_PATH=/data/data.sqlite`
+
 ## What is NOT built (intentionally out of scope)
 
 - Real authentication / session tokens
