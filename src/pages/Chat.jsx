@@ -649,6 +649,24 @@ function DayDivider({label}) {
 function MessageRow({ m, mine, grouped, currentUser, onReact, onDelete }) {
   const [hovered, setHovered] = useState(false)
   const [showPicker, setShowPicker] = useState(false)
+  const [showMenu, setShowMenu] = useState(false)
+  const [menuHover, setMenuHover] = useState(false)
+  const wrapRef = useRef(null)
+
+  const hasActions = !m.deleted && (onReact || (mine && onDelete))
+  const isActive = hasActions && (hovered || showPicker || showMenu)
+
+  useEffect(() => {
+    if (!showPicker && !showMenu) return
+    const close = (e) => {
+      if (!wrapRef.current?.contains(e.target)) {
+        setShowPicker(false)
+        setShowMenu(false)
+      }
+    }
+    document.addEventListener('mousedown', close)
+    return () => document.removeEventListener('mousedown', close)
+  }, [showPicker, showMenu])
 
   const reactions = m.reactions || []
   const reactionGroups = {}
@@ -660,9 +678,10 @@ function MessageRow({ m, mine, grouped, currentUser, onReact, onDelete }) {
 
   return (
     <div
+      ref={wrapRef}
       style={{...cs.msgRow, justifyContent: mine ? "flex-end" : "flex-start", marginTop: grouped ? 2 : 10}}
       onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => { setHovered(false); setShowPicker(false) }}
+      onMouseLeave={() => setHovered(false)}
     >
       {!mine && (
         <div style={{width:32, marginRight:10, display:"flex", alignItems:"flex-end", flexShrink:0}}>
@@ -678,35 +697,8 @@ function MessageRow({ m, mine, grouped, currentUser, onReact, onDelete }) {
           <div style={cs.bubbleWho}>@{m.who} · <span style={cs.bubbleTime}>{fmtTime(m.ts)}</span></div>
         )}
 
+        {/* Bubble + inline action pill */}
         <div style={{display:"flex", alignItems:"center", gap:5, flexDirection: mine ? "row-reverse" : "row"}}>
-          {/* Action buttons on hover */}
-          {hovered && !m.deleted && onReact && (
-            <div style={cs.msgActions}>
-              <div style={{position:"relative"}}>
-                <button style={cs.actionBtn} onClick={() => setShowPicker(v => !v)} title="Add reaction">
-                  <span style={{fontSize:13, lineHeight:1}}>😊</span>
-                </button>
-                {showPicker && (
-                  <div style={{...cs.reactionPicker, ...(mine ? {right:0} : {left:0}), bottom:"calc(100% + 4px)"}}>
-                    {['👍','❤️','😂','😮','😢','🔥'].map(em => (
-                      <button key={em} style={cs.reactionPickBtn}
-                        onClick={() => { onReact(em); setShowPicker(false) }}>
-                        {em}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-              {mine && onDelete && (
-                <button style={cs.actionBtn} onClick={onDelete} title="Delete message">
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none">
-                    <path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                  </svg>
-                </button>
-              )}
-            </div>
-          )}
-
           <div style={{
             ...cs.bubble,
             ...(m.deleted ? cs.bubbleDeleted : mine ? cs.bubbleMine : cs.bubbleTheirs),
@@ -720,6 +712,90 @@ function MessageRow({ m, mine, grouped, currentUser, onReact, onDelete }) {
             }
             {m.streaming && m.text && <span className="stream-cursor" style={{marginLeft:1, opacity:0.7}}>▍</span>}
           </div>
+
+          {/* Action pill — stays mounted while picker/menu open */}
+          {isActive && (
+            <div style={{position:"relative", flexShrink:0}}>
+              {/* Reaction emoji picker — floats above the pill */}
+              {showPicker && onReact && (
+                <div style={{
+                  position:"absolute",
+                  bottom:"calc(100% + 5px)",
+                  ...(mine ? {right:0} : {left:0}),
+                  display:"flex",
+                  gap:1,
+                  background:"var(--card)",
+                  border:"1px solid var(--line)",
+                  borderRadius:24,
+                  padding:"5px 8px",
+                  boxShadow:"var(--shadow-md)",
+                  zIndex:40,
+                  whiteSpace:"nowrap",
+                }}>
+                  {['👍','❤️','😂','😮','😢','🔥'].map(em => (
+                    <button key={em} style={cs.reactionPickBtn}
+                      onClick={() => { onReact(em); setShowPicker(false) }}>
+                      {em}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {/* 3-dot context menu — floats below the pill */}
+              {showMenu && mine && onDelete && (
+                <div style={{
+                  position:"absolute",
+                  top:"calc(100% + 5px)",
+                  right:0,
+                  background:"var(--card)",
+                  border:"1px solid var(--line)",
+                  borderRadius:12,
+                  padding:"4px",
+                  boxShadow:"var(--shadow-md)",
+                  zIndex:40,
+                  minWidth:160,
+                }}>
+                  <button
+                    style={{...cs.menuItem, ...(menuHover ? cs.menuItemHover : {})}}
+                    onMouseEnter={() => setMenuHover(true)}
+                    onMouseLeave={() => setMenuHover(false)}
+                    onClick={() => { onDelete(); setShowMenu(false) }}>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" style={{flexShrink:0}}>
+                      <path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                    </svg>
+                    Delete message
+                  </button>
+                </div>
+              )}
+
+              {/* The pill itself */}
+              <div style={cs.actionPill}>
+                {onReact && (
+                  <button
+                    style={{...cs.actionPillBtn, ...(showPicker ? cs.actionPillBtnOn : {})}}
+                    onClick={() => { setShowPicker(v => !v); setShowMenu(false) }}
+                    title="Add reaction">
+                    <span style={{fontSize:14, lineHeight:1}}>😊</span>
+                  </button>
+                )}
+                {onReact && mine && onDelete && (
+                  <div style={{width:1, height:16, background:"var(--line)", flexShrink:0}}/>
+                )}
+                {mine && onDelete && (
+                  <button
+                    style={{...cs.actionPillBtn, ...(showMenu ? cs.actionPillBtnOn : {})}}
+                    onClick={() => { setShowMenu(v => !v); setShowPicker(false) }}
+                    title="More options">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+                      <circle cx="12" cy="6" r="1.5" fill="currentColor"/>
+                      <circle cx="12" cy="12" r="1.5" fill="currentColor"/>
+                      <circle cx="12" cy="18" r="1.5" fill="currentColor"/>
+                    </svg>
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Reactions */}
@@ -842,10 +918,12 @@ const cs = {
   bubbleTime: { color:"var(--ink-mute)" },
   bubbleTimeMine: { fontSize:11, color:"var(--ink-mute)", marginTop:4, marginRight:2 },
 
-  msgActions: { display:"flex", flexDirection:"column", gap:3 },
-  actionBtn: { width:26, height:26, borderRadius:7, border:"1px solid var(--line)", background:"var(--card)", color:"var(--ink-soft)", display:"grid", placeItems:"center", cursor:"pointer", boxShadow:"var(--shadow-sm)" },
-  reactionPicker: { position:"absolute", display:"flex", gap:1, background:"var(--card)", border:"1px solid var(--line)", borderRadius:12, padding:"5px 7px", boxShadow:"var(--shadow-md)", zIndex:30 },
-  reactionPickBtn: { width:30, height:30, borderRadius:7, border:"none", background:"transparent", fontSize:16, cursor:"pointer", display:"grid", placeItems:"center" },
+  actionPill: { display:"inline-flex", alignItems:"center", background:"var(--card)", border:"1px solid var(--line)", borderRadius:20, boxShadow:"var(--shadow-sm)" },
+  actionPillBtn: { width:28, height:28, borderRadius:14, border:"none", background:"transparent", cursor:"pointer", display:"grid", placeItems:"center", color:"var(--ink-soft)" },
+  actionPillBtnOn: { background:"var(--bg-2)" },
+  reactionPickBtn: { width:30, height:30, borderRadius:7, border:"none", background:"transparent", fontSize:17, cursor:"pointer", display:"grid", placeItems:"center" },
+  menuItem: { display:"flex", alignItems:"center", gap:8, width:"100%", padding:"7px 12px", borderRadius:8, border:"none", background:"transparent", color:"oklch(0.45 0.18 25)", fontSize:13.5, cursor:"pointer", fontWeight:500, textAlign:"left" },
+  menuItemHover: { background:"oklch(0.96 0.02 25)" },
   reactionsRow: { display:"flex", flexWrap:"wrap", gap:4, marginTop:4 },
   reactionPill: { display:"inline-flex", alignItems:"center", gap:2, padding:"2px 8px 2px 6px", borderRadius:12, border:"1px solid var(--line)", background:"var(--bg-2)", fontSize:14, cursor:"pointer", lineHeight:1.4 },
   reactionPillActive: { background:"var(--accent-soft)", borderColor:"var(--accent)" },

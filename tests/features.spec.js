@@ -128,9 +128,10 @@ test('message deletion shows placeholder for both users', async ({ browser }) =>
   await expect(aliceMain.getByText(msgText)).toBeVisible({ timeout: 5_000 })
   await expect(bobMain.getByText(msgText)).toBeVisible({ timeout: 5_000 })
 
-  // Alice hovers then deletes her own message
+  // Alice hovers, opens 3-dot menu, deletes her own message
   await aliceMain.getByText(msgText).hover()
-  await alice.page.getByTitle('Delete message').click()
+  await alice.page.getByTitle('More options').click()
+  await alice.page.getByRole('button', { name: /delete message/i }).click()
 
   // Original text disappears for Alice (proof of deletion)
   await expect(aliceMain.getByText(msgText)).toBeHidden({ timeout: 5_000 })
