@@ -23,11 +23,33 @@ db.exec(`
     who TEXT NOT NULL,
     text TEXT NOT NULL,
     ts INTEGER NOT NULL,
-    client_id TEXT UNIQUE
+    client_id TEXT UNIQUE,
+    deleted INTEGER DEFAULT 0
   );
 
   CREATE INDEX IF NOT EXISTS idx_messages_room_ts ON messages(room_id, ts);
+
+  CREATE TABLE IF NOT EXISTS reactions (
+    message_id TEXT NOT NULL,
+    emoji TEXT NOT NULL,
+    who TEXT NOT NULL,
+    PRIMARY KEY (message_id, emoji, who)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_reactions_msg ON reactions(message_id);
 `)
+
+// Migrate existing databases
+try { db.exec('ALTER TABLE messages ADD COLUMN deleted INTEGER DEFAULT 0') } catch {}
+// Fix accidental rename: if text_col exists, rename it back to text
+{
+  const cols = db.prepare('PRAGMA table_info(messages)').all()
+  const hasTextCol = cols.some(c => c.name === 'text_col')
+  const hasText = cols.some(c => c.name === 'text')
+  if (hasTextCol && !hasText) {
+    db.exec('ALTER TABLE messages RENAME COLUMN text_col TO text')
+  }
+}
 
 const DEFAULT_ROOMS = [
   { id: 'r-general', name: 'General',   emoji: '💬', createdBy: 'system', daysAgo: 10 },

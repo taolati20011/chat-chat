@@ -4,7 +4,7 @@ import { generateAnimalName } from '../utils/animalNames'
 
 function Login({ setUser }) {
   const navigate = useNavigate()
-  const [name, setName] = useState(() => generateAnimalName())
+  const [name, setName] = useState(() => localStorage.getItem('chatchat.lastUser') || generateAnimalName())
   const [shake, setShake] = useState(false)
   const inputRef = useRef(null)
 
@@ -24,6 +24,7 @@ function Login({ setUser }) {
       setTimeout(() => setShake(false), 420)
       return
     }
+    localStorage.removeItem('chatchat.lastUser')
     setUser(v)
     navigate('/chat')
   }

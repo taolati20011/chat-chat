@@ -5,7 +5,7 @@ const router = Router()
 
 const listStmt = db.prepare('SELECT * FROM rooms ORDER BY created_at ASC')
 const lastMsgStmt = db.prepare(
-  'SELECT who, text, ts FROM messages WHERE room_id = ? ORDER BY ts DESC LIMIT 1'
+  'SELECT who, text, ts FROM messages WHERE room_id = ? AND deleted = 0 ORDER BY ts DESC LIMIT 1'
 )
 const insertRoomStmt = db.prepare(
   'INSERT INTO rooms (id, name, emoji, created_by, created_at) VALUES (?, ?, ?, ?, ?)'

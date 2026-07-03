@@ -10,8 +10,29 @@ const latestStmt = db.prepare(
   `SELECT * FROM messages WHERE room_id = ? ORDER BY ts DESC LIMIT ?`
 )
 
-function toMessageDto(row) {
-  return { id: row.id, who: row.who, text: row.text, ts: row.ts }
+function getReactionsForMessages(msgIds) {
+  if (!msgIds.length) return {}
+  const placeholders = msgIds.map(() => '?').join(',')
+  const rows = db.prepare(
+    `SELECT message_id, emoji, who FROM reactions WHERE message_id IN (${placeholders})`
+  ).all(...msgIds)
+  const map = {}
+  for (const r of rows) {
+    if (!map[r.message_id]) map[r.message_id] = []
+    map[r.message_id].push({ emoji: r.emoji, who: r.who })
+  }
+  return map
+}
+
+function toMessageDto(row, reactionsMap = {}) {
+  return {
+    id: row.id,
+    who: row.who,
+    text: row.deleted ? null : row.text,
+    ts: row.ts,
+    deleted: !!row.deleted,
+    reactions: reactionsMap[row.id] || [],
+  }
 }
 
 export const insertMessageStmt = db.prepare(
@@ -19,6 +40,9 @@ export const insertMessageStmt = db.prepare(
 )
 export const findByClientIdStmt = db.prepare(
   `SELECT * FROM messages WHERE client_id = ?`
+)
+export const deleteMessageStmt = db.prepare(
+  `UPDATE messages SET deleted = 1 WHERE id = ? AND who = ?`
 )
 
 router.get('/:roomId/messages', (req, res) => {
@@ -28,7 +52,9 @@ router.get('/:roomId/messages', (req, res) => {
   const rows = Number.isFinite(before)
     ? pageStmt.all(roomId, before, limit)
     : latestStmt.all(roomId, limit)
-  res.json(rows.reverse().map(toMessageDto))
+  const reversed = rows.reverse()
+  const reactionsMap = reversed.length ? getReactionsForMessages(reversed.map(r => r.id)) : {}
+  res.json(reversed.map(r => toMessageDto(r, reactionsMap)))
 })
 
 export default router

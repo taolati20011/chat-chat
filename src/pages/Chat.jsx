@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { getRooms, getMessages, createRoom as apiCreateRoom, sendAiMessage } from '../lib/api'
+import { getRooms, getMessages, createRoom as apiCreateRoom } from '../lib/api'
 import { getSocket, disconnectSocket } from '../lib/socket'
 
 const fmtTime = (ts) => {
@@ -43,13 +43,30 @@ function Chat({ user, logout }) {
   const [aiMessages, setAiMessages] = useState([])
   const [aiDraft, setAiDraft] = useState("")
   const [aiLoading, setAiLoading] = useState(false)
+  const [hasMore, setHasMore] = useState(false)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [unreadByRoom, setUnreadByRoom] = useState({})
+  const [typingByRoom, setTypingByRoom] = useState({})
+  const [displayName, setDisplayName] = useState(user)
+
   const scrollRef = useRef(null)
   const emojiWrapRef = useRef(null)
   const socketRef = useRef(null)
   const activeRoomIdRef = useRef(null)
   const prevRoomRef = useRef(null)
+  const roomsRef = useRef([])
+  const typingTimerRef = useRef(null)
+  const suppressScrollRef = useRef(false)
 
   useEffect(() => { activeRoomIdRef.current = activeRoomId }, [activeRoomId])
+  useEffect(() => { roomsRef.current = rooms }, [rooms])
+
+  // Request browser notification permission once
+  useEffect(() => {
+    if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+      Notification.requestPermission()
+    }
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -67,35 +84,66 @@ function Chat({ user, logout }) {
 
     const onMessageNew = (msg) => {
       setRooms(prev => prev.map(r =>
-        r.id === msg.roomId ? { ...r, lastMessage: { who: msg.who, text: msg.text, ts: msg.ts } } : r
+        r.id === msg.roomId ? { ...r, lastMessage: { who: msg.who, text: msg.text || '(message)', ts: msg.ts } } : r
       ))
-      if (msg.roomId !== activeRoomIdRef.current) return
+      if (msg.roomId !== activeRoomIdRef.current) {
+        setUnreadByRoom(prev => ({ ...prev, [msg.roomId]: (prev[msg.roomId] || 0) + 1 }))
+        if (
+          typeof Notification !== 'undefined' &&
+          Notification.permission === 'granted' &&
+          document.hidden &&
+          msg.who !== displayName
+        ) {
+          const room = roomsRef.current.find(r => r.id === msg.roomId)
+          new Notification(`${msg.who} · #${room?.name || msg.roomId}`, { body: msg.text || '' })
+        }
+        return
+      }
       setMessages(prev => {
         const idx = prev.findIndex(m => m.clientId && m.clientId === msg.clientId)
         if (idx !== -1) {
           const copy = [...prev]
-          copy[idx] = { id: msg.id, who: msg.who, text: msg.text, ts: msg.ts }
+          copy[idx] = { id: msg.id, who: msg.who, text: msg.text, ts: msg.ts, reactions: msg.reactions || [], deleted: false }
           return copy
         }
         if (prev.some(m => m.id === msg.id)) return prev
-        return [...prev, { id: msg.id, who: msg.who, text: msg.text, ts: msg.ts }]
+        return [...prev, { id: msg.id, who: msg.who, text: msg.text, ts: msg.ts, reactions: msg.reactions || [], deleted: false }]
       })
     }
+
     const onPresence = ({ roomId, users }) => {
       setPresenceByRoom(prev => ({ ...prev, [roomId]: users }))
     }
     const onRoomCreated = (room) => {
       setRooms(prev => prev.some(r => r.id === room.id) ? prev : [room, ...prev])
     }
+    const onTypingUpdate = ({ roomId, users }) => {
+      setTypingByRoom(prev => ({ ...prev, [roomId]: users }))
+    }
+    const onReactionUpdate = ({ messageId, reactions }) => {
+      setMessages(prev => prev.map(m => m.id === messageId ? { ...m, reactions } : m))
+    }
+    const onMessageDeleted = ({ messageId }) => {
+      setMessages(prev => prev.map(m => m.id === messageId ? { ...m, deleted: true, text: null } : m))
+    }
+    const onNameResolved = ({ name }) => setDisplayName(name)
 
     socket.on('message:new', onMessageNew)
     socket.on('presence:update', onPresence)
     socket.on('room:created', onRoomCreated)
+    socket.on('typing:update', onTypingUpdate)
+    socket.on('reaction:update', onReactionUpdate)
+    socket.on('message:deleted', onMessageDeleted)
+    socket.on('name:resolved', onNameResolved)
 
     return () => {
       socket.off('message:new', onMessageNew)
       socket.off('presence:update', onPresence)
       socket.off('room:created', onRoomCreated)
+      socket.off('typing:update', onTypingUpdate)
+      socket.off('reaction:update', onReactionUpdate)
+      socket.off('message:deleted', onMessageDeleted)
+      socket.off('name:resolved', onNameResolved)
     }
   }, [user])
 
@@ -108,7 +156,11 @@ function Chat({ user, logout }) {
     socket.emit('room:join', activeRoomId)
     prevRoomRef.current = activeRoomId
     setMessages([])
-    getMessages(activeRoomId).then(setMessages).catch(console.error)
+    setHasMore(false)
+    getMessages(activeRoomId).then(msgs => {
+      setMessages(msgs)
+      setHasMore(msgs.length >= 50)
+    }).catch(console.error)
   }, [activeRoomId])
 
   const filteredRooms = useMemo(() => {
@@ -120,9 +172,8 @@ function Chat({ user, logout }) {
   const active = rooms.find(r => r.id === activeRoomId)
 
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight
-    }
+    if (suppressScrollRef.current) { suppressScrollRef.current = false; return }
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight
   }, [activeRoomId, messages.length, aiMessages.length, aiMode])
 
   useEffect(() => {
@@ -144,22 +195,32 @@ function Chat({ user, logout }) {
     const name = newName.trim()
     if (!name) return
     try {
-      const room = await apiCreateRoom({ name, emoji: newEmoji, createdBy: user })
+      const room = await apiCreateRoom({ name, emoji: newEmoji, createdBy: displayName })
       setRooms(prev => prev.some(r => r.id === room.id) ? prev : [room, ...prev])
       setActiveRoomId(room.id)
-    } catch (e) {
-      console.error(e)
-    }
-    setNewName(""); setNewEmoji("💬"); setShowNew(false)
-    setAiMode(false)
+    } catch (e) { console.error(e) }
+    setNewName(""); setNewEmoji("💬"); setShowNew(false); setAiMode(false)
+  }
+
+  const handleDraftChange = (val) => {
+    if (aiMode) { setAiDraft(val); return }
+    setDraft(val)
+    if (!active) return
+    socketRef.current?.emit('typing:start', active.id)
+    if (typingTimerRef.current) clearTimeout(typingTimerRef.current)
+    typingTimerRef.current = setTimeout(() => {
+      socketRef.current?.emit('typing:stop', active.id)
+      typingTimerRef.current = null
+    }, 2000)
   }
 
   const send = () => {
     const text = draft.trim()
     if (!text || !active) return
+    if (typingTimerRef.current) { clearTimeout(typingTimerRef.current); typingTimerRef.current = null }
+    socketRef.current?.emit('typing:stop', active.id)
     const clientId = crypto.randomUUID()
-    const optimistic = { id: clientId, clientId, who: user, text, ts: Date.now() }
-    setMessages(prev => [...prev, optimistic])
+    setMessages(prev => [...prev, { id: clientId, clientId, who: displayName, text, ts: Date.now(), reactions: [], deleted: false }])
     socketRef.current?.emit('message:send', { roomId: active.id, text, clientId })
     setDraft("")
   }
@@ -167,32 +228,71 @@ function Chat({ user, logout }) {
   const sendAi = async () => {
     const text = aiDraft.trim()
     if (!text || aiLoading) return
-    const userMsg = { id: "ai-"+Date.now(), who: user, text, ts: Date.now(), role: "user" }
+    const userMsg = { id: 'ai-' + Date.now(), who: displayName, text, ts: Date.now(), role: 'user' }
     const nextHistory = [...aiMessages, userMsg]
     setAiMessages(nextHistory)
-    setAiDraft("")
+    setAiDraft('')
     setAiLoading(true)
+    const replyId = 'ai-' + Date.now() + '-r'
+    setAiMessages(prev => [...prev, { id: replyId, who: 'Gemini', text: '', ts: Date.now(), role: 'assistant', streaming: true }])
     try {
-      const history = nextHistory.map(m => ({ role: m.role, text: m.text }))
-      const { text: reply } = await sendAiMessage(history)
-      setAiMessages(prev => [...prev, {
-        id: "ai-"+Date.now()+"-r",
-        who: "Gemini",
-        text: reply,
-        ts: Date.now(),
-        role: "assistant"
-      }])
+      const response = await fetch('/api/ai/stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: nextHistory.map(m => ({ role: m.role, text: m.text })) }),
+      })
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buf = ''
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buf += decoder.decode(value, { stream: true })
+        const lines = buf.split('\n')
+        buf = lines.pop()
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue
+          const raw = line.slice(6).trim()
+          if (raw === '[DONE]' || !raw) continue
+          try {
+            const { text: chunk, error } = JSON.parse(raw)
+            if (error) throw new Error(error)
+            if (chunk) setAiMessages(prev => prev.map(m => m.id === replyId ? { ...m, text: m.text + chunk } : m))
+          } catch (e) { if (e.message !== 'Unexpected end of JSON input') throw e }
+        }
+      }
     } catch (err) {
-      setAiMessages(prev => [...prev, {
-        id: "ai-"+Date.now()+"-err",
-        who: "Gemini",
-        text: "⚠️ " + (err.message || "Something went wrong, please try again."),
-        ts: Date.now(),
-        role: "assistant"
-      }])
+      setAiMessages(prev => prev.map(m => m.id === replyId ? { ...m, text: '⚠️ ' + (err.message || 'Error') } : m))
     } finally {
+      setAiMessages(prev => prev.map(m => m.id === replyId ? { ...m, streaming: false } : m))
       setAiLoading(false)
     }
+  }
+
+  const loadMore = async () => {
+    if (loadingMore || !hasMore || !activeRoomId) return
+    const el = scrollRef.current
+    const prevH = el?.scrollHeight || 0
+    setLoadingMore(true)
+    try {
+      const oldestTs = messages[0]?.ts
+      const older = await getMessages(activeRoomId, { before: oldestTs, limit: 50 })
+      if (older.length) {
+        suppressScrollRef.current = true
+        setMessages(prev => [...older, ...prev])
+        requestAnimationFrame(() => { if (el) el.scrollTop = el.scrollHeight - prevH })
+      }
+      setHasMore(older.length >= 50)
+    } catch (e) { console.error(e) } finally { setLoadingMore(false) }
+  }
+
+  const handleReact = (messageId, emoji) => {
+    socketRef.current?.emit('reaction:toggle', { messageId, roomId: activeRoomIdRef.current, emoji })
+  }
+
+  const handleDelete = (messageId) => {
+    socketRef.current?.emit('message:delete', { messageId, roomId: activeRoomIdRef.current })
   }
 
   const onKey = (e) => {
@@ -205,12 +305,13 @@ function Chat({ user, logout }) {
   const selectRoom = (id) => {
     setActiveRoomId(id)
     setAiMode(false)
+    setUnreadByRoom(prev => ({ ...prev, [id]: 0 }))
   }
 
   const lastMsgPreview = (room) => {
     const lm = room.lastMessage
     if (!lm) return { text:"no messages yet", ts: room.createdAt, you:false }
-    return { text: lm.text, ts: lm.ts, you: lm.who === user }
+    return { text: lm.text || '(message)', ts: lm.ts, you: lm.who === displayName }
   }
 
   const handleLogout = () => {
@@ -220,12 +321,16 @@ function Chat({ user, logout }) {
   }
 
   const currentDraft = aiMode ? aiDraft : draft
-  const setCurrentDraft = aiMode ? setAiDraft : setDraft
-
-  const presentUsers = (presenceByRoom[active?.id] || []).filter(n => n !== user)
+  const presentUsers = (presenceByRoom[active?.id] || []).filter(n => n !== displayName)
+  const typingUsers = (typingByRoom[active?.id] || []).filter(u => u !== displayName)
 
   return (
     <div style={cs.app}>
+      <style>{`
+        @keyframes blink{0%,100%{opacity:1}50%{opacity:0.2}}
+        .stream-cursor{animation:blink 1s step-end infinite}
+      `}</style>
+
       {/* SIDEBAR */}
       <aside style={cs.sidebar}>
         <div style={cs.sideTop}>
@@ -253,7 +358,6 @@ function Chat({ user, logout }) {
           />
         </div>
 
-        {/* AI Chat button */}
         <button
           style={{...cs.aiBtn, ...(aiMode ? cs.aiBtnActive : {})}}
           onClick={() => setAiMode(true)}
@@ -276,6 +380,7 @@ function Chat({ user, logout }) {
           {filteredRooms.map(room => {
             const sel = !aiMode && room.id === activeRoomId
             const last = lastMsgPreview(room)
+            const unread = unreadByRoom[room.id] || 0
             return (
               <button key={room.id}
                 onClick={()=>selectRoom(room.id)}
@@ -284,7 +389,12 @@ function Chat({ user, logout }) {
                 <div style={{flex:1, minWidth:0, textAlign:"left"}}>
                   <div style={cs.roomLine1}>
                     <span style={cs.roomName}>{room.name}</span>
-                    <span style={cs.roomTime}>{fmtDay(last.ts)}</span>
+                    <div style={{display:"flex", alignItems:"center", gap:5}}>
+                      {unread > 0 && (
+                        <div style={cs.unreadBadge}>{unread > 99 ? "99+" : unread}</div>
+                      )}
+                      <span style={cs.roomTime}>{fmtDay(last.ts)}</span>
+                    </div>
                   </div>
                   <div style={cs.roomLine2}>
                     {last.you && <span style={cs.roomYou}>You: </span>}
@@ -300,11 +410,11 @@ function Chat({ user, logout }) {
         </div>
 
         <div style={cs.youBar}>
-          <div style={{...cs.avatar, background: avatarBg(user), color: avatarInk(user)}}>
-            {initials(user)}
+          <div style={{...cs.avatar, background: avatarBg(displayName), color: avatarInk(displayName)}}>
+            {initials(displayName)}
           </div>
           <div style={{flex:1, minWidth:0}}>
-            <div style={cs.youName}>@{user}</div>
+            <div style={cs.youName}>@{displayName}</div>
             <div style={cs.youStatus}>
               <span style={cs.statusDot}/> online
             </div>
@@ -321,11 +431,10 @@ function Chat({ user, logout }) {
                 <div style={{...cs.headEmoji, background:"oklch(0.92 0.06 280)"}}>🤖</div>
                 <div>
                   <div style={cs.headName}>AI Chat</div>
-                  <div style={cs.headMeta}>powered by Gemini · always available</div>
+                  <div style={cs.headMeta}>powered by Gemini · streaming responses</div>
                 </div>
               </div>
             </header>
-
             <div style={cs.convoBody} ref={scrollRef}>
               {aiMessages.length === 0 ? (
                 <div style={cs.empty2}>
@@ -336,7 +445,7 @@ function Chat({ user, logout }) {
               ) : (
                 <div style={{display:"flex", flexDirection:"column", gap:2}}>
                   {aiMessages.map(m => (
-                    <MessageRow key={m.id} m={m} mine={m.role === "user"} grouped={false}/>
+                    <MessageRow key={m.id} m={m} mine={m.role === "user"} grouped={false} currentUser={displayName}/>
                   ))}
                 </div>
               )}
@@ -364,10 +473,23 @@ function Chat({ user, logout }) {
                 </button>
               </div>
             </header>
-
             <div style={cs.convoBody} ref={scrollRef}>
-              <MessageList messages={messages} user={user} room={active}/>
+              <MessageList
+                messages={messages}
+                user={displayName}
+                room={active}
+                hasMore={hasMore}
+                loadingMore={loadingMore}
+                onLoadMore={loadMore}
+                onReact={handleReact}
+                onDelete={handleDelete}
+              />
             </div>
+            {typingUsers.length > 0 && (
+              <div style={cs.typingBar}>
+                ✦ {typingUsers.slice(0,3).join(', ')} {typingUsers.length === 1 ? 'is' : 'are'} typing…
+              </div>
+            )}
           </>
         ) : (
           <div style={cs.noRoom}>
@@ -377,15 +499,14 @@ function Chat({ user, logout }) {
           </div>
         )}
 
-        {/* COMPOSER — always visible when in a room or AI mode */}
         {(aiMode || active) && (
           <div style={cs.composer}>
             <div style={cs.composerInner}>
               <textarea
                 style={cs.compInput}
-                placeholder={aiMode ? "Ask AI anything..." : `Message #${active.name.toLowerCase().replace(/\s+/g,"-")}`}
+                placeholder={aiMode ? "Ask AI anything…" : `Message #${active?.name.toLowerCase().replace(/\s+/g,"-")} · @AI for Gemini`}
                 value={currentDraft}
-                onChange={(e)=>setCurrentDraft(e.target.value)}
+                onChange={(e)=>handleDraftChange(e.target.value)}
                 onKeyDown={onKey}
                 rows={1}
               />
@@ -425,14 +546,12 @@ function Chat({ user, logout }) {
         )}
       </main>
 
-      {/* NEW ROOM MODAL */}
       {showNew && (
         <div style={cs.scrim} onClick={()=>setShowNew(false)}>
           <div style={cs.modal} onClick={(e)=>e.stopPropagation()}>
             <div style={cs.modalKicker}>New category</div>
             <h3 style={cs.modalH}>Create a new room</h3>
             <p style={cs.modalP}>Give it a name and an emoji so it's easy to spot in the list.</p>
-
             <label style={cs.label}>Emoji</label>
             <div style={cs.emojiGrid}>
               {ROOM_PRESETS.map(e => (
@@ -443,7 +562,6 @@ function Chat({ user, logout }) {
                 </button>
               ))}
             </div>
-
             <label style={cs.label}>Name</label>
             <input
               style={cs.modalInput}
@@ -453,7 +571,6 @@ function Chat({ user, logout }) {
               autoFocus
               onKeyDown={(e)=>{ if (e.key==="Enter") createRoom() }}
             />
-
             <div style={cs.modalActions}>
               <button style={cs.ctaGhost} onClick={()=>setShowNew(false)}>Cancel</button>
               <button
@@ -470,8 +587,8 @@ function Chat({ user, logout }) {
   )
 }
 
-function MessageList({ messages, user, room }) {
-  if (!messages.length) {
+function MessageList({ messages, user, room, hasMore, loadingMore, onLoadMore, onReact, onDelete }) {
+  if (!messages.length && !hasMore) {
     return (
       <div style={cs.empty2}>
         <div style={cs.emptyEmoji}>{room.emoji}</div>
@@ -488,18 +605,35 @@ function MessageList({ messages, user, room }) {
     const day = fmtDay(m.ts)
     if (day !== lastDay) {
       rows.push(<DayDivider key={"d"+i} label={day}/>)
-      lastDay = day
-      lastWho = ""
+      lastDay = day; lastWho = ""
     }
     const gap = m.ts - lastTs
     const grouped = m.who === lastWho && gap < 5*60_000
     rows.push(
-      <MessageRow key={m.id} m={m} mine={m.who === user} grouped={grouped}/>
+      <MessageRow
+        key={m.id}
+        m={m}
+        mine={m.who === user}
+        grouped={grouped}
+        currentUser={user}
+        onReact={onReact ? (emoji) => onReact(m.id, emoji) : null}
+        onDelete={onDelete ? () => onDelete(m.id) : null}
+      />
     )
-    lastWho = m.who
-    lastTs = m.ts
+    lastWho = m.who; lastTs = m.ts
   })
-  return <div style={{display:"flex", flexDirection:"column", gap:2}}>{rows}</div>
+  return (
+    <div style={{display:"flex", flexDirection:"column", gap:2}}>
+      {(hasMore || loadingMore) && (
+        <div style={{textAlign:"center", padding:"12px 0 4px"}}>
+          <button style={cs.loadMoreBtn} onClick={onLoadMore} disabled={loadingMore}>
+            {loadingMore ? "Loading…" : "↑ Load earlier messages"}
+          </button>
+        </div>
+      )}
+      {rows}
+    </div>
+  )
 }
 
 function DayDivider({label}) {
@@ -512,11 +646,26 @@ function DayDivider({label}) {
   )
 }
 
-function MessageRow({m, mine, grouped}) {
+function MessageRow({ m, mine, grouped, currentUser, onReact, onDelete }) {
+  const [hovered, setHovered] = useState(false)
+  const [showPicker, setShowPicker] = useState(false)
+
+  const reactions = m.reactions || []
+  const reactionGroups = {}
+  for (const r of reactions) {
+    if (!reactionGroups[r.emoji]) reactionGroups[r.emoji] = []
+    reactionGroups[r.emoji].push(r.who)
+  }
+  const hasReactions = Object.keys(reactionGroups).length > 0
+
   return (
-    <div style={{...cs.msgRow, justifyContent: mine ? "flex-end" : "flex-start", marginTop: grouped ? 2 : 10}}>
+    <div
+      style={{...cs.msgRow, justifyContent: mine ? "flex-end" : "flex-start", marginTop: grouped ? 2 : 10}}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => { setHovered(false); setShowPicker(false) }}
+    >
       {!mine && (
-        <div style={{width:32, marginRight:10, display:"flex", alignItems:"flex-end"}}>
+        <div style={{width:32, marginRight:10, display:"flex", alignItems:"flex-end", flexShrink:0}}>
           {!grouped && (
             <div style={{...cs.avatarSm, background: avatarBg(m.who), color: avatarInk(m.who)}}>
               {initials(m.who)}
@@ -528,13 +677,67 @@ function MessageRow({m, mine, grouped}) {
         {!mine && !grouped && (
           <div style={cs.bubbleWho}>@{m.who} · <span style={cs.bubbleTime}>{fmtTime(m.ts)}</span></div>
         )}
-        <div style={{
-          ...cs.bubble,
-          ...(mine ? cs.bubbleMine : cs.bubbleTheirs),
-          ...(grouped ? (mine ? cs.bubbleMineGrouped : cs.bubbleTheirsGrouped) : {})
-        }}>
-          {m.text}
+
+        <div style={{display:"flex", alignItems:"center", gap:5, flexDirection: mine ? "row-reverse" : "row"}}>
+          {/* Action buttons on hover */}
+          {hovered && !m.deleted && onReact && (
+            <div style={cs.msgActions}>
+              <div style={{position:"relative"}}>
+                <button style={cs.actionBtn} onClick={() => setShowPicker(v => !v)} title="Add reaction">
+                  <span style={{fontSize:13, lineHeight:1}}>😊</span>
+                </button>
+                {showPicker && (
+                  <div style={{...cs.reactionPicker, ...(mine ? {right:0} : {left:0}), bottom:"calc(100% + 4px)"}}>
+                    {['👍','❤️','😂','😮','😢','🔥'].map(em => (
+                      <button key={em} style={cs.reactionPickBtn}
+                        onClick={() => { onReact(em); setShowPicker(false) }}>
+                        {em}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+              {mine && onDelete && (
+                <button style={cs.actionBtn} onClick={onDelete} title="Delete message">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none">
+                    <path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                  </svg>
+                </button>
+              )}
+            </div>
+          )}
+
+          <div style={{
+            ...cs.bubble,
+            ...(m.deleted ? cs.bubbleDeleted : mine ? cs.bubbleMine : cs.bubbleTheirs),
+            ...(grouped && !m.deleted ? (mine ? cs.bubbleMineGrouped : cs.bubbleTheirsGrouped) : {}),
+          }}>
+            {m.deleted
+              ? <em>Message deleted</em>
+              : m.streaming && !m.text
+              ? <span style={{opacity:0.45}}>…</span>
+              : m.text
+            }
+            {m.streaming && m.text && <span className="stream-cursor" style={{marginLeft:1, opacity:0.7}}>▍</span>}
+          </div>
         </div>
+
+        {/* Reactions */}
+        {!m.deleted && hasReactions && (
+          <div style={cs.reactionsRow}>
+            {Object.entries(reactionGroups).map(([emoji, users]) => (
+              <button
+                key={emoji}
+                style={{...cs.reactionPill, ...(users.includes(currentUser) ? cs.reactionPillActive : {})}}
+                onClick={() => onReact?.(emoji)}
+                title={users.join(', ')}
+              >
+                {emoji}<span style={{fontSize:11, marginLeft:2}}>{users.length}</span>
+              </button>
+            ))}
+          </div>
+        )}
+
         {mine && !grouped && (
           <div style={cs.bubbleTimeMine}>{fmtTime(m.ts)}</div>
         )}
@@ -599,6 +802,7 @@ const cs = {
   roomPrev: { fontSize:12.5, color:"var(--ink-mute)", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis", maxWidth:200 },
 
   empty: { padding:"22px 14px", color:"var(--ink-mute)", fontSize:13, textAlign:"center" },
+  unreadBadge: { minWidth:18, height:18, borderRadius:9, background:"var(--accent)", color:"#fff", fontSize:10, fontWeight:700, display:"grid", placeItems:"center", padding:"0 4px", fontFamily:"var(--mono)" },
 
   youBar: { display:"flex", alignItems:"center", gap:12, padding:"12px 16px", borderTop:"1px solid var(--line)", background:"var(--bg-2)" },
   avatar: { width:36, height:36, borderRadius:"50%", display:"grid", placeItems:"center", fontWeight:700, fontSize:13 },
@@ -619,6 +823,9 @@ const cs = {
   presenceCount: { marginLeft:8, fontSize:12, color:"var(--ink-mute)", fontFamily:"var(--mono)" },
 
   convoBody: { flex:1, overflowY:"auto", padding:"20px 28px", minHeight:0 },
+  typingBar: { padding:"4px 28px 6px", fontSize:12.5, color:"var(--ink-mute)", fontStyle:"italic", minHeight:26 },
+
+  loadMoreBtn: { padding:"5px 18px", borderRadius:20, border:"1px solid var(--line)", background:"var(--bg-2)", color:"var(--ink-mute)", fontSize:12, cursor:"pointer", fontFamily:"var(--mono)" },
 
   dayWrap: { display:"flex", alignItems:"center", gap:12, margin:"18px 0" },
   dayLine: { flex:1, height:1, background:"var(--line)" },
@@ -630,9 +837,18 @@ const cs = {
   bubbleMine: { background:"var(--ink)", color:"#fff", borderTopRightRadius:6 },
   bubbleTheirsGrouped: { borderTopLeftRadius:18, borderBottomLeftRadius:18 },
   bubbleMineGrouped: { borderTopRightRadius:18, borderBottomRightRadius:18 },
+  bubbleDeleted: { background:"var(--bg-2)", color:"var(--ink-mute)", border:"1px dashed var(--line)", borderRadius:18, fontStyle:"italic" },
   bubbleWho: { fontSize:11.5, color:"var(--ink-mute)", marginBottom:4, marginLeft:2, fontWeight:500 },
   bubbleTime: { color:"var(--ink-mute)" },
   bubbleTimeMine: { fontSize:11, color:"var(--ink-mute)", marginTop:4, marginRight:2 },
+
+  msgActions: { display:"flex", flexDirection:"column", gap:3 },
+  actionBtn: { width:26, height:26, borderRadius:7, border:"1px solid var(--line)", background:"var(--card)", color:"var(--ink-soft)", display:"grid", placeItems:"center", cursor:"pointer", boxShadow:"var(--shadow-sm)" },
+  reactionPicker: { position:"absolute", display:"flex", gap:1, background:"var(--card)", border:"1px solid var(--line)", borderRadius:12, padding:"5px 7px", boxShadow:"var(--shadow-md)", zIndex:30 },
+  reactionPickBtn: { width:30, height:30, borderRadius:7, border:"none", background:"transparent", fontSize:16, cursor:"pointer", display:"grid", placeItems:"center" },
+  reactionsRow: { display:"flex", flexWrap:"wrap", gap:4, marginTop:4 },
+  reactionPill: { display:"inline-flex", alignItems:"center", gap:2, padding:"2px 8px 2px 6px", borderRadius:12, border:"1px solid var(--line)", background:"var(--bg-2)", fontSize:14, cursor:"pointer", lineHeight:1.4 },
+  reactionPillActive: { background:"var(--accent-soft)", borderColor:"var(--accent)" },
 
   composer: { padding:"12px 28px 22px", background:"var(--bg)" },
   composerInner: { display:"flex", alignItems:"center", gap:6, padding:"8px 8px 8px 16px", background:"var(--card)", border:"1px solid var(--line)", borderRadius:28, boxShadow:"var(--shadow-sm)" },
