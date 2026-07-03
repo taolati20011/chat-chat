@@ -48,6 +48,9 @@ function Chat({ user, logout }) {
   const [unreadByRoom, setUnreadByRoom] = useState({})
   const [typingByRoom, setTypingByRoom] = useState({})
   const [displayName, setDisplayName] = useState(user)
+  const [mentionQuery, setMentionQuery] = useState(null)
+  const [mentionIndex, setMentionIndex] = useState(0)
+  const [replyTo, setReplyTo] = useState(null)
 
   const scrollRef = useRef(null)
   const emojiWrapRef = useRef(null)
@@ -103,11 +106,11 @@ function Chat({ user, logout }) {
         const idx = prev.findIndex(m => m.clientId && m.clientId === msg.clientId)
         if (idx !== -1) {
           const copy = [...prev]
-          copy[idx] = { id: msg.id, who: msg.who, text: msg.text, ts: msg.ts, reactions: msg.reactions || [], deleted: false }
+          copy[idx] = { id: msg.id, who: msg.who, text: msg.text, ts: msg.ts, reactions: msg.reactions || [], deleted: false, replyTo: msg.replyTo || null }
           return copy
         }
         if (prev.some(m => m.id === msg.id)) return prev
-        return [...prev, { id: msg.id, who: msg.who, text: msg.text, ts: msg.ts, reactions: msg.reactions || [], deleted: false }]
+        return [...prev, { id: msg.id, who: msg.who, text: msg.text, ts: msg.ts, reactions: msg.reactions || [], deleted: false, replyTo: msg.replyTo || null }]
       })
     }
 
@@ -171,6 +174,15 @@ function Chat({ user, logout }) {
 
   const active = rooms.find(r => r.id === activeRoomId)
 
+  const mentionSuggestions = useMemo(() => {
+    if (mentionQuery === null || aiMode) return []
+    const q = mentionQuery.toLowerCase()
+    const fixed = ['All', 'AI'].filter(n => n.toLowerCase().startsWith(q))
+    const present = (presenceByRoom[active?.id] || [])
+      .filter(n => n !== displayName && n.toLowerCase().startsWith(q))
+    return [...fixed, ...present]
+  }, [mentionQuery, aiMode, presenceByRoom, active, displayName])
+
   useEffect(() => {
     if (suppressScrollRef.current) { suppressScrollRef.current = false; return }
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight
@@ -205,6 +217,14 @@ function Chat({ user, logout }) {
   const handleDraftChange = (val) => {
     if (aiMode) { setAiDraft(val); return }
     setDraft(val)
+    // Detect @mention at end of text
+    const atMatch = val.match(/@([^\s@]*)$/)
+    if (atMatch) {
+      setMentionQuery(atMatch[1])
+      setMentionIndex(0)
+    } else if (mentionQuery !== null) {
+      setMentionQuery(null)
+    }
     if (!active) return
     socketRef.current?.emit('typing:start', active.id)
     if (typingTimerRef.current) clearTimeout(typingTimerRef.current)
@@ -214,15 +234,25 @@ function Chat({ user, logout }) {
     }, 2000)
   }
 
+  const insertMention = (name) => {
+    const newDraft = draft.replace(/@([^\s@]*)$/, `@${name} `)
+    setDraft(newDraft)
+    setMentionQuery(null)
+    setMentionIndex(0)
+  }
+
   const send = () => {
     const text = draft.trim()
     if (!text || !active) return
     if (typingTimerRef.current) { clearTimeout(typingTimerRef.current); typingTimerRef.current = null }
     socketRef.current?.emit('typing:stop', active.id)
     const clientId = crypto.randomUUID()
-    setMessages(prev => [...prev, { id: clientId, clientId, who: displayName, text, ts: Date.now(), reactions: [], deleted: false }])
-    socketRef.current?.emit('message:send', { roomId: active.id, text, clientId })
+    const currentReplyTo = replyTo || null
+    setMessages(prev => [...prev, { id: clientId, clientId, who: displayName, text, ts: Date.now(), reactions: [], deleted: false, replyTo: currentReplyTo }])
+    socketRef.current?.emit('message:send', { roomId: active.id, text, clientId, replyTo: currentReplyTo })
     setDraft("")
+    setReplyTo(null)
+    setMentionQuery(null)
   }
 
   const sendAi = async () => {
@@ -295,7 +325,17 @@ function Chat({ user, logout }) {
     socketRef.current?.emit('message:delete', { messageId, roomId: activeRoomIdRef.current })
   }
 
+  const handleReply = (msg) => {
+    setReplyTo({ id: msg.id, who: msg.who, text: msg.text })
+  }
+
   const onKey = (e) => {
+    if (mentionQuery !== null && mentionSuggestions.length > 0) {
+      if (e.key === 'ArrowDown') { e.preventDefault(); setMentionIndex(i => Math.min(i + 1, mentionSuggestions.length - 1)); return }
+      if (e.key === 'ArrowUp') { e.preventDefault(); setMentionIndex(i => Math.max(i - 1, 0)); return }
+      if (e.key === 'Enter') { e.preventDefault(); insertMention(mentionSuggestions[mentionIndex]); return }
+      if (e.key === 'Escape') { setMentionQuery(null); return }
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault()
       aiMode ? sendAi() : send()
@@ -322,6 +362,7 @@ function Chat({ user, logout }) {
 
   const currentDraft = aiMode ? aiDraft : draft
   const presentUsers = (presenceByRoom[active?.id] || []).filter(n => n !== displayName)
+  const allRoomUsers = presenceByRoom[active?.id] || []
   const typingUsers = (typingByRoom[active?.id] || []).filter(u => u !== displayName)
 
   return (
@@ -464,7 +505,7 @@ function Chat({ user, logout }) {
                 </div>
               </div>
               <div style={cs.headActions}>
-                <PresenceStack names={presentUsers.slice(0,4)} extra={Math.max(0, presentUsers.length-4)}/>
+                <PresenceDropdown allPresent={allRoomUsers} currentUser={displayName} />
                 <button style={cs.iconBtn} title="Room info">
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
                     <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2"/>
@@ -483,6 +524,7 @@ function Chat({ user, logout }) {
                 onLoadMore={loadMore}
                 onReact={handleReact}
                 onDelete={handleDelete}
+                onReply={handleReply}
               />
             </div>
             {typingUsers.length > 0 && (
@@ -500,7 +542,45 @@ function Chat({ user, logout }) {
         )}
 
         {(aiMode || active) && (
-          <div style={cs.composer}>
+          <div style={{...cs.composer, position:"relative"}}>
+            {/* @mention autocomplete dropdown */}
+            {mentionQuery !== null && mentionSuggestions.length > 0 && (
+              <div style={cs.mentionDropdown}>
+                {mentionSuggestions.map((name, i) => (
+                  <button
+                    key={name}
+                    style={{...cs.mentionItem, ...(i === mentionIndex ? cs.mentionItemSel : {})}}
+                    onMouseDown={(e) => { e.preventDefault(); insertMention(name) }}
+                    onMouseEnter={() => setMentionIndex(i)}
+                  >
+                    {name === 'All'
+                      ? <span style={cs.mentionIcon}>👥</span>
+                      : name === 'AI'
+                      ? <span style={cs.mentionIcon}>🤖</span>
+                      : <div style={{...cs.avatarSm, width:22, height:22, fontSize:9, flexShrink:0, background:avatarBg(name), color:avatarInk(name)}}>{initials(name)}</div>
+                    }
+                    <span style={{fontWeight:600}}>@{name}</span>
+                    {name === 'All' && <span style={cs.mentionHint}>mention everyone</span>}
+                    {name === 'AI' && <span style={cs.mentionHint}>ask Gemini</span>}
+                  </button>
+                ))}
+              </div>
+            )}
+            {replyTo && !aiMode && (
+              <div style={cs.replyStrip}>
+                <div style={{width:3, borderRadius:2, background:"var(--accent)", flexShrink:0, alignSelf:"stretch"}}/>
+                <div style={{flex:1, minWidth:0, paddingLeft:4}}>
+                  <div style={{fontSize:11, fontWeight:600, color:"var(--accent-ink)", marginBottom:1}}>Reply to @{replyTo.who}</div>
+                  <div style={{fontSize:12.5, color:"var(--ink-mute)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap"}}>{replyTo.text?.slice(0,120)}</div>
+                </div>
+                <button style={{border:"none", background:"transparent", cursor:"pointer", color:"var(--ink-mute)", padding:"2px 4px", display:"grid", placeItems:"center", borderRadius:6}}
+                  onClick={() => setReplyTo(null)}>
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none">
+                    <path d="M18 6 6 18M6 6l12 12" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"/>
+                  </svg>
+                </button>
+              </div>
+            )}
             <div style={cs.composerInner}>
               <textarea
                 style={cs.compInput}
@@ -587,7 +667,7 @@ function Chat({ user, logout }) {
   )
 }
 
-function MessageList({ messages, user, room, hasMore, loadingMore, onLoadMore, onReact, onDelete }) {
+function MessageList({ messages, user, room, hasMore, loadingMore, onLoadMore, onReact, onDelete, onReply }) {
   if (!messages.length && !hasMore) {
     return (
       <div style={cs.empty2}>
@@ -618,6 +698,7 @@ function MessageList({ messages, user, room, hasMore, loadingMore, onLoadMore, o
         currentUser={user}
         onReact={onReact ? (emoji) => onReact(m.id, emoji) : null}
         onDelete={onDelete ? () => onDelete(m.id) : null}
+        onReply={onReply ? () => onReply(m) : null}
       />
     )
     lastWho = m.who; lastTs = m.ts
@@ -646,14 +727,14 @@ function DayDivider({label}) {
   )
 }
 
-function MessageRow({ m, mine, grouped, currentUser, onReact, onDelete }) {
+function MessageRow({ m, mine, grouped, currentUser, onReact, onDelete, onReply }) {
   const [hovered, setHovered] = useState(false)
   const [showPicker, setShowPicker] = useState(false)
   const [showMenu, setShowMenu] = useState(false)
-  const [menuHover, setMenuHover] = useState(false)
   const wrapRef = useRef(null)
 
-  const hasActions = !m.deleted && (onReact || (mine && onDelete))
+  const hasMenu = onReply || (mine && onDelete)
+  const hasActions = !m.deleted && (onReact || hasMenu)
   const isActive = hasActions && (hovered || showPicker || showMenu)
 
   useEffect(() => {
@@ -679,145 +760,171 @@ function MessageRow({ m, mine, grouped, currentUser, onReact, onDelete }) {
   return (
     <div
       ref={wrapRef}
-      style={{...cs.msgRow, justifyContent: mine ? "flex-end" : "flex-start", marginTop: grouped ? 2 : 10}}
+      style={{display:"flex", flexDirection:"column", alignItems: mine ? "flex-end" : "flex-start", marginTop: grouped ? 2 : 10}}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
-      {!mine && (
-        <div style={{width:32, marginRight:10, display:"flex", alignItems:"flex-end", flexShrink:0}}>
-          {!grouped && (
-            <div style={{...cs.avatarSm, background: avatarBg(m.who), color: avatarInk(m.who)}}>
-              {initials(m.who)}
-            </div>
+      {/* Avatar aligned to bubble bottom only — reactions are outside this row */}
+      <div style={{display:"flex", alignItems:"flex-end", maxWidth:"62%"}}>
+        {!mine && (
+          <div style={{width:32, marginRight:10, flexShrink:0}}>
+            {!grouped && (
+              <div style={{...cs.avatarSm, background: avatarBg(m.who), color: avatarInk(m.who)}}>
+                {initials(m.who)}
+              </div>
+            )}
+          </div>
+        )}
+        <div style={{display:"flex", flexDirection:"column", alignItems: mine ? "flex-end" : "flex-start", minWidth:0, flex:1}}>
+          {!mine && !grouped && (
+            <div style={cs.bubbleWho}>@{m.who} · <span style={cs.bubbleTime}>{fmtTime(m.ts)}</span></div>
           )}
+
+          {/* Bubble + inline action pill */}
+          <div style={{display:"flex", alignItems:"center", gap:5, flexDirection: mine ? "row-reverse" : "row"}}>
+            <div style={{
+              ...cs.bubble,
+              ...(m.deleted ? cs.bubbleDeleted : mine ? cs.bubbleMine : cs.bubbleTheirs),
+              ...(grouped && !m.deleted ? (mine ? cs.bubbleMineGrouped : cs.bubbleTheirsGrouped) : {}),
+            }}>
+              {m.replyTo && !m.deleted && (
+                <div style={{display:"flex",gap:8,padding:"5px 8px",borderRadius:8,marginBottom:6,background:mine?"oklch(1 0 0 / 0.12)":"var(--bg-2)",border:`1px solid ${mine?"oklch(1 0 0 / 0.15)":"var(--line)"}`}}>
+                  <div style={{width:3,borderRadius:2,background:mine?"oklch(1 0 0 / 0.4)":"var(--accent)",flexShrink:0,alignSelf:"stretch",minHeight:12}}/>
+                  <div style={{minWidth:0,flex:1}}>
+                    <div style={{fontSize:11,fontWeight:600,color:mine?"oklch(1 0 0 / 0.6)":"var(--accent-ink)",marginBottom:1}}>@{m.replyTo.who}</div>
+                    <div style={{fontSize:12,color:mine?"oklch(1 0 0 / 0.65)":"var(--ink-mute)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{m.replyTo.text?.slice(0,100)}{m.replyTo.text?.length > 100 ? '…' : ''}</div>
+                  </div>
+                </div>
+              )}
+              {m.deleted
+                ? <em>Message deleted</em>
+                : m.streaming && !m.text
+                ? <span style={{opacity:0.45}}>…</span>
+                : m.text
+              }
+              {m.streaming && m.text && <span className="stream-cursor" style={{marginLeft:1, opacity:0.7}}>▍</span>}
+            </div>
+
+            {/* Action pill — stays mounted while picker/menu open */}
+            {isActive && (
+              <div style={{position:"relative", flexShrink:0}}>
+                {/* Reaction emoji picker — floats above the pill */}
+                {showPicker && onReact && (
+                  <div style={{
+                    position:"absolute",
+                    bottom:"calc(100% + 5px)",
+                    ...(mine ? {right:0} : {left:0}),
+                    display:"flex",
+                    gap:1,
+                    background:"var(--card)",
+                    border:"1px solid var(--line)",
+                    borderRadius:24,
+                    padding:"5px 8px",
+                    boxShadow:"var(--shadow-md)",
+                    zIndex:40,
+                    whiteSpace:"nowrap",
+                  }}>
+                    {['👍','❤️','😂','😮','😢','🔥'].map(em => (
+                      <button key={em} style={cs.reactionPickBtn}
+                        onClick={() => { onReact(em); setShowPicker(false) }}>
+                        {em}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                {/* 3-dot context menu — floats above the pill */}
+                {showMenu && hasMenu && (
+                  <div style={{
+                    position:"absolute",
+                    bottom:"calc(100% + 5px)",
+                    ...(mine ? {right:0} : {left:0}),
+                    background:"var(--card)",
+                    border:"1px solid var(--line)",
+                    borderRadius:12,
+                    padding:"4px",
+                    boxShadow:"var(--shadow-md)",
+                    zIndex:40,
+                    minWidth:160,
+                  }}>
+                    {onReply && (
+                      <button
+                        style={cs.menuItem}
+                        onMouseEnter={e => e.currentTarget.style.background='var(--bg-2)'}
+                        onMouseLeave={e => e.currentTarget.style.background='transparent'}
+                        onClick={() => { onReply(); setShowMenu(false) }}>
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" style={{flexShrink:0}}>
+                          <path d="M9 17l-5-5 5-5M4 12h10a7 7 0 0 1 7 7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                        </svg>
+                        Reply
+                      </button>
+                    )}
+                    {mine && onDelete && (
+                      <button
+                        style={{...cs.menuItem, color:"oklch(0.45 0.18 25)"}}
+                        onMouseEnter={e => e.currentTarget.style.background='oklch(0.96 0.02 25)'}
+                        onMouseLeave={e => e.currentTarget.style.background='transparent'}
+                        onClick={() => { onDelete(); setShowMenu(false) }}>
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" style={{flexShrink:0}}>
+                          <path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                        </svg>
+                        Delete message
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                {/* The pill itself */}
+                <div style={cs.actionPill}>
+                  {onReact && (
+                    <button
+                      style={{...cs.actionPillBtn, ...(showPicker ? cs.actionPillBtnOn : {})}}
+                      onClick={() => { setShowPicker(v => !v); setShowMenu(false) }}
+                      title="Add reaction">
+                      <span style={{fontSize:14, lineHeight:1}}>😊</span>
+                    </button>
+                  )}
+                  {onReact && hasMenu && (
+                    <div style={{width:1, height:16, background:"var(--line)", flexShrink:0}}/>
+                  )}
+                  {hasMenu && (
+                    <button
+                      style={{...cs.actionPillBtn, ...(showMenu ? cs.actionPillBtnOn : {})}}
+                      onClick={() => { setShowMenu(v => !v); setShowPicker(false) }}
+                      title="More options">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+                        <circle cx="12" cy="6" r="1.5" fill="currentColor"/>
+                        <circle cx="12" cy="12" r="1.5" fill="currentColor"/>
+                        <circle cx="12" cy="18" r="1.5" fill="currentColor"/>
+                      </svg>
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Reactions outside the avatar row — avatar stays at bubble bottom */}
+      {!m.deleted && hasReactions && (
+        <div style={{...cs.reactionsRow, ...(mine ? {} : {marginLeft:42})}}>
+          {Object.entries(reactionGroups).map(([emoji, users]) => (
+            <button
+              key={emoji}
+              style={{...cs.reactionPill, ...(users.includes(currentUser) ? cs.reactionPillActive : {})}}
+              onClick={() => onReact?.(emoji)}
+              title={users.join(', ')}
+            >
+              {emoji}<span style={{fontSize:11, marginLeft:2}}>{users.length}</span>
+            </button>
+          ))}
         </div>
       )}
-      <div style={{maxWidth:"62%", display:"flex", flexDirection:"column", alignItems: mine ? "flex-end" : "flex-start"}}>
-        {!mine && !grouped && (
-          <div style={cs.bubbleWho}>@{m.who} · <span style={cs.bubbleTime}>{fmtTime(m.ts)}</span></div>
-        )}
 
-        {/* Bubble + inline action pill */}
-        <div style={{display:"flex", alignItems:"center", gap:5, flexDirection: mine ? "row-reverse" : "row"}}>
-          <div style={{
-            ...cs.bubble,
-            ...(m.deleted ? cs.bubbleDeleted : mine ? cs.bubbleMine : cs.bubbleTheirs),
-            ...(grouped && !m.deleted ? (mine ? cs.bubbleMineGrouped : cs.bubbleTheirsGrouped) : {}),
-          }}>
-            {m.deleted
-              ? <em>Message deleted</em>
-              : m.streaming && !m.text
-              ? <span style={{opacity:0.45}}>…</span>
-              : m.text
-            }
-            {m.streaming && m.text && <span className="stream-cursor" style={{marginLeft:1, opacity:0.7}}>▍</span>}
-          </div>
-
-          {/* Action pill — stays mounted while picker/menu open */}
-          {isActive && (
-            <div style={{position:"relative", flexShrink:0}}>
-              {/* Reaction emoji picker — floats above the pill */}
-              {showPicker && onReact && (
-                <div style={{
-                  position:"absolute",
-                  bottom:"calc(100% + 5px)",
-                  ...(mine ? {right:0} : {left:0}),
-                  display:"flex",
-                  gap:1,
-                  background:"var(--card)",
-                  border:"1px solid var(--line)",
-                  borderRadius:24,
-                  padding:"5px 8px",
-                  boxShadow:"var(--shadow-md)",
-                  zIndex:40,
-                  whiteSpace:"nowrap",
-                }}>
-                  {['👍','❤️','😂','😮','😢','🔥'].map(em => (
-                    <button key={em} style={cs.reactionPickBtn}
-                      onClick={() => { onReact(em); setShowPicker(false) }}>
-                      {em}
-                    </button>
-                  ))}
-                </div>
-              )}
-
-              {/* 3-dot context menu — floats below the pill */}
-              {showMenu && mine && onDelete && (
-                <div style={{
-                  position:"absolute",
-                  top:"calc(100% + 5px)",
-                  right:0,
-                  background:"var(--card)",
-                  border:"1px solid var(--line)",
-                  borderRadius:12,
-                  padding:"4px",
-                  boxShadow:"var(--shadow-md)",
-                  zIndex:40,
-                  minWidth:160,
-                }}>
-                  <button
-                    style={{...cs.menuItem, ...(menuHover ? cs.menuItemHover : {})}}
-                    onMouseEnter={() => setMenuHover(true)}
-                    onMouseLeave={() => setMenuHover(false)}
-                    onClick={() => { onDelete(); setShowMenu(false) }}>
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" style={{flexShrink:0}}>
-                      <path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                    </svg>
-                    Delete message
-                  </button>
-                </div>
-              )}
-
-              {/* The pill itself */}
-              <div style={cs.actionPill}>
-                {onReact && (
-                  <button
-                    style={{...cs.actionPillBtn, ...(showPicker ? cs.actionPillBtnOn : {})}}
-                    onClick={() => { setShowPicker(v => !v); setShowMenu(false) }}
-                    title="Add reaction">
-                    <span style={{fontSize:14, lineHeight:1}}>😊</span>
-                  </button>
-                )}
-                {onReact && mine && onDelete && (
-                  <div style={{width:1, height:16, background:"var(--line)", flexShrink:0}}/>
-                )}
-                {mine && onDelete && (
-                  <button
-                    style={{...cs.actionPillBtn, ...(showMenu ? cs.actionPillBtnOn : {})}}
-                    onClick={() => { setShowMenu(v => !v); setShowPicker(false) }}
-                    title="More options">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
-                      <circle cx="12" cy="6" r="1.5" fill="currentColor"/>
-                      <circle cx="12" cy="12" r="1.5" fill="currentColor"/>
-                      <circle cx="12" cy="18" r="1.5" fill="currentColor"/>
-                    </svg>
-                  </button>
-                )}
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Reactions */}
-        {!m.deleted && hasReactions && (
-          <div style={cs.reactionsRow}>
-            {Object.entries(reactionGroups).map(([emoji, users]) => (
-              <button
-                key={emoji}
-                style={{...cs.reactionPill, ...(users.includes(currentUser) ? cs.reactionPillActive : {})}}
-                onClick={() => onReact?.(emoji)}
-                title={users.join(', ')}
-              >
-                {emoji}<span style={{fontSize:11, marginLeft:2}}>{users.length}</span>
-              </button>
-            ))}
-          </div>
-        )}
-
-        {mine && !grouped && (
-          <div style={cs.bubbleTimeMine}>{fmtTime(m.ts)}</div>
-        )}
-      </div>
+      {mine && !grouped && (
+        <div style={cs.bubbleTimeMine}>{fmtTime(m.ts)}</div>
+      )}
     </div>
   )
 }
@@ -837,6 +944,49 @@ function PresenceStack({names, extra}) {
         </div>
       ))}
       {extra > 0 && <span style={cs.presenceCount}>+{extra}</span>}
+    </div>
+  )
+}
+
+function PresenceDropdown({ allPresent, currentUser }) {
+  const [open, setOpen] = useState(false)
+  const others = allPresent.filter(n => n !== currentUser)
+  if (allPresent.length === 0) return null
+  return (
+    <div style={{position:"relative"}}
+      onMouseEnter={() => setOpen(true)}
+      onMouseLeave={() => setOpen(false)}>
+      <div style={{...cs.presence, cursor:"default"}}>
+        {others.slice(0, 4).map((n, i) => (
+          <div key={n} style={{
+            ...cs.presenceAvatar,
+            background: avatarBg(n),
+            color: avatarInk(n),
+            marginLeft: i === 0 ? 0 : -8,
+            zIndex: 10 - i,
+          }}>
+            {initials(n)}
+          </div>
+        ))}
+        {others.length > 4 && <span style={cs.presenceCount}>+{others.length - 4}</span>}
+        {others.length === 0 && (
+          <span style={{fontSize:12, color:"var(--ink-mute)"}}>Only you</span>
+        )}
+      </div>
+      {open && (
+        <div style={cs.presencePanel}>
+          <div style={cs.presencePanelTitle}>In this room · {allPresent.length}</div>
+          {[currentUser, ...others].map(n => (
+            <div key={n} style={cs.presencePanelRow}>
+              <div style={{...cs.presenceAvatar, marginLeft:0, zIndex:1, background:avatarBg(n), color:avatarInk(n)}}>
+                {initials(n)}
+              </div>
+              <span style={cs.presencePanelName}>{n}{n === currentUser ? ' (you)' : ''}</span>
+              <span style={cs.presenceOnlineDot}/>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
@@ -922,13 +1072,26 @@ const cs = {
   actionPillBtn: { width:28, height:28, borderRadius:14, border:"none", background:"transparent", cursor:"pointer", display:"grid", placeItems:"center", color:"var(--ink-soft)" },
   actionPillBtnOn: { background:"var(--bg-2)" },
   reactionPickBtn: { width:30, height:30, borderRadius:7, border:"none", background:"transparent", fontSize:17, cursor:"pointer", display:"grid", placeItems:"center" },
-  menuItem: { display:"flex", alignItems:"center", gap:8, width:"100%", padding:"7px 12px", borderRadius:8, border:"none", background:"transparent", color:"oklch(0.45 0.18 25)", fontSize:13.5, cursor:"pointer", fontWeight:500, textAlign:"left" },
+  menuItem: { display:"flex", alignItems:"center", gap:8, width:"100%", padding:"7px 12px", borderRadius:8, border:"none", background:"transparent", color:"var(--ink)", fontSize:13.5, cursor:"pointer", fontWeight:500, textAlign:"left" },
   menuItemHover: { background:"oklch(0.96 0.02 25)" },
   reactionsRow: { display:"flex", flexWrap:"wrap", gap:4, marginTop:4 },
   reactionPill: { display:"inline-flex", alignItems:"center", gap:2, padding:"2px 8px 2px 6px", borderRadius:12, border:"1px solid var(--line)", background:"var(--bg-2)", fontSize:14, cursor:"pointer", lineHeight:1.4 },
   reactionPillActive: { background:"var(--accent-soft)", borderColor:"var(--accent)" },
 
+  replyStrip: { display:"flex", alignItems:"center", gap:10, marginBottom:8, padding:"8px 12px", background:"var(--bg-2)", borderRadius:10, border:"1px solid var(--line)" },
+
+  presencePanel: { position:"absolute", top:"calc(100% + 8px)", right:0, background:"var(--card)", border:"1px solid var(--line)", borderRadius:12, padding:"4px 0", boxShadow:"var(--shadow-md)", zIndex:30, minWidth:190, whiteSpace:"nowrap" },
+  presencePanelTitle: { padding:"6px 14px 8px", fontSize:10.5, fontFamily:"var(--mono)", color:"var(--ink-mute)", textTransform:"uppercase", letterSpacing:"0.08em", borderBottom:"1px solid var(--line)", marginBottom:4 },
+  presencePanelRow: { display:"flex", alignItems:"center", gap:10, padding:"5px 14px" },
+  presencePanelName: { fontSize:13, fontWeight:500, color:"var(--ink)", flex:1 },
+  presenceOnlineDot: { width:6, height:6, borderRadius:"50%", background:"oklch(0.7 0.16 145)", flexShrink:0 },
+
   composer: { padding:"12px 28px 22px", background:"var(--bg)" },
+  mentionDropdown: { position:"absolute", bottom:"calc(100% - 8px)", left:28, right:28, background:"var(--card)", border:"1px solid var(--line)", borderRadius:12, padding:"4px", boxShadow:"var(--shadow-md)", zIndex:30, maxHeight:220, overflowY:"auto" },
+  mentionItem: { display:"flex", alignItems:"center", gap:10, width:"100%", padding:"7px 12px", borderRadius:8, border:"none", background:"transparent", color:"var(--ink)", cursor:"pointer", fontSize:13.5, fontWeight:400, textAlign:"left" },
+  mentionItemSel: { background:"var(--bg-2)" },
+  mentionIcon: { fontSize:16, lineHeight:1, flexShrink:0 },
+  mentionHint: { fontSize:12, color:"var(--ink-mute)", marginLeft:"auto", fontFamily:"var(--mono)" },
   composerInner: { display:"flex", alignItems:"center", gap:6, padding:"8px 8px 8px 16px", background:"var(--card)", border:"1px solid var(--line)", borderRadius:28, boxShadow:"var(--shadow-sm)" },
   compIconLg: { width:42, height:42, borderRadius:"50%", border:"none", background:"transparent", color:"var(--ink-soft)", cursor:"pointer", display:"grid", placeItems:"center", flexShrink:0 },
   compInput: { flex:1, border:"none", outline:"none", resize:"none", background:"transparent", fontSize:14.5, lineHeight:1.5, color:"var(--ink)", padding:"4px 2px", maxHeight:120, minHeight:24 },

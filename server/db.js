@@ -41,6 +41,9 @@ db.exec(`
 
 // Migrate existing databases
 try { db.exec('ALTER TABLE messages ADD COLUMN deleted INTEGER DEFAULT 0') } catch {}
+try { db.exec('ALTER TABLE messages ADD COLUMN reply_to_id TEXT') } catch {}
+try { db.exec('ALTER TABLE messages ADD COLUMN reply_to_who TEXT') } catch {}
+try { db.exec('ALTER TABLE messages ADD COLUMN reply_to_text TEXT') } catch {}
 // Fix accidental rename: if text_col exists, rename it back to text
 {
   const cols = db.prepare('PRAGMA table_info(messages)').all()

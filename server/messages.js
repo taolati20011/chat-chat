@@ -32,11 +32,12 @@ function toMessageDto(row, reactionsMap = {}) {
     ts: row.ts,
     deleted: !!row.deleted,
     reactions: reactionsMap[row.id] || [],
+    replyTo: row.reply_to_id ? { id: row.reply_to_id, who: row.reply_to_who, text: row.reply_to_text } : null,
   }
 }
 
 export const insertMessageStmt = db.prepare(
-  `INSERT INTO messages (id, room_id, who, text, ts, client_id) VALUES (?, ?, ?, ?, ?, ?)`
+  `INSERT INTO messages (id, room_id, who, text, ts, client_id, reply_to_id, reply_to_who, reply_to_text) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
 )
 export const findByClientIdStmt = db.prepare(
   `SELECT * FROM messages WHERE client_id = ?`

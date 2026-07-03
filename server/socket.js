@@ -129,7 +129,7 @@ export function attachSocketHandlers(io) {
       }
     })
 
-    socket.on('message:send', ({ roomId, text, clientId } = {}) => {
+    socket.on('message:send', ({ roomId, text, clientId, replyTo } = {}) => {
       if (typeof roomId !== 'string' || typeof text !== 'string' || typeof clientId !== 'string') return
       const trimmed = text.trim().slice(0, 4000)
       if (!trimmed) return
@@ -147,14 +147,20 @@ export function attachSocketHandlers(io) {
 
       const existing = findByClientIdStmt.get(clientId)
       if (existing) {
-        socket.emit('message:new', { id: existing.id, roomId, who: existing.who, text: existing.text, ts: existing.ts, clientId, reactions: [] })
+        const exReply = existing.reply_to_id ? { id: existing.reply_to_id, who: existing.reply_to_who, text: existing.reply_to_text } : null
+        socket.emit('message:new', { id: existing.id, roomId, who: existing.who, text: existing.text, ts: existing.ts, clientId, reactions: [], replyTo: exReply })
         return
       }
 
+      const replyToId = (replyTo && typeof replyTo.id === 'string') ? replyTo.id : null
+      const replyToWho = (replyTo && typeof replyTo.who === 'string') ? replyTo.who : null
+      const replyToText = (replyTo && typeof replyTo.text === 'string') ? replyTo.text.slice(0, 200) : null
+      const replyToPayload = replyToId ? { id: replyToId, who: replyToWho, text: replyToText } : null
+
       const id = crypto.randomUUID()
-      insertMessageStmt.run(id, roomId, user, trimmed, now, clientId)
+      insertMessageStmt.run(id, roomId, user, trimmed, now, clientId, replyToId, replyToWho, replyToText)
       // Broadcast globally so clients in other rooms can track unread counts
-      io.emit('message:new', { id, roomId, who: user, text: trimmed, ts: now, clientId, reactions: [] })
+      io.emit('message:new', { id, roomId, who: user, text: trimmed, ts: now, clientId, reactions: [], replyTo: replyToPayload })
 
       if (AI_TRIGGER.test(trimmed)) {
         const question = trimmed.replace(AI_TRIGGER, '').trim()
