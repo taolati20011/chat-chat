@@ -10,14 +10,21 @@ const AI_TRIGGER = /^@AI\s+/i
 const presence = new Map()
 // roomId -> Map<user, timeoutId>
 const typing = new Map()
-// currently connected display names (prevents same-name duplicates)
-const takenNames = new Set()
+// name → Set<sessionId>: only assign a suffix for a *different* sessionId
+const takenNameSessions = new Map()
 
-function resolveDisplayName(requested) {
-  if (!takenNames.has(requested)) return requested
+function resolveDisplayName(requestedName, sessionId) {
+  const sessions = takenNameSessions.get(requestedName)
+  // Name is free, or this sessionId already owns it (same device, duplicate tab)
+  if (!sessions || sessions.has(sessionId)) return requestedName
+  // Taken by a different device — find the next free slot for this sessionId
   let n = 2
-  while (takenNames.has(`${requested} #${n}`)) n++
-  return `${requested} #${n}`
+  while (true) {
+    const candidate = `${requestedName} #${n}`
+    const cSessions = takenNameSessions.get(candidate)
+    if (!cSessions || cSessions.has(sessionId)) return candidate
+    n++
+  }
 }
 
 const insertReactionStmt = db.prepare(
@@ -59,10 +66,13 @@ function clearTyping(roomId, user, io) {
 export function attachSocketHandlers(io) {
   io.on('connection', (socket) => {
     const requestedName = (socket.handshake.auth?.user || '').trim().slice(0, 24)
+    const sessionId = (socket.handshake.auth?.sessionId || '').trim().slice(0, 64)
     if (!requestedName) { socket.disconnect(true); return }
-    const user = resolveDisplayName(requestedName)
-    takenNames.add(user)
+    const user = resolveDisplayName(requestedName, sessionId)
+    if (!takenNameSessions.has(user)) takenNameSessions.set(user, new Set())
+    takenNameSessions.get(user).add(sessionId)
     socket.data.user = user
+    socket.data.sessionId = sessionId
     socket.data.joinedRooms = new Set()
     socket.data.sendTimestamps = []
     socket.emit('name:resolved', { name: user })
@@ -161,7 +171,11 @@ export function attachSocketHandlers(io) {
     })
 
     socket.on('disconnect', () => {
-      takenNames.delete(user)
+      const sessions = takenNameSessions.get(user)
+      if (sessions) {
+        sessions.delete(sessionId)
+        if (sessions.size === 0) takenNameSessions.delete(user)
+      }
       for (const roomId of socket.data.joinedRooms) {
         clearTyping(roomId, user, io)
         removePresence(roomId, user)
